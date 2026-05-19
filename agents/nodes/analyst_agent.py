@@ -1,62 +1,63 @@
-"""
-analyst_agent.py
-Node: Synthesizes all collected sources into a structured analysis —
-summary, key findings, themes, and recommendations using an LLM.
-"""
+import json
 import logging
-from typing import List, Dict, Any
-from agents.state import ResearchState as AgentState
+from langchain_core.prompts import ChatPromptTemplate
+from agents.state import ResearchState
+from config.settings import get_llm
 
 logger = logging.getLogger(__name__)
 
-
-def _build_context(sources: List[Dict[str, Any]]) -> str:
-    """Concatenate source contents into a single context block for the LLM."""
-    snippets = []
-    for i, src in enumerate(sources, 1):
-        snippets.append(f"[{i}] {src.get('title', 'Untitled')}\n{src.get('content', '')}")
-    return "\n\n".join(snippets)
-
-
-def analyst_agent_node(state: AgentState) -> AgentState:
-    """
-    LangGraph node — reads `sources` from state and produces structured analysis.
-    """
-    sources = state.get("sources", [])
-    refined_topic = state.get("refined_topic", "")
-    logger.info("[analyst_agent] Analyzing %d sources for topic: %s", len(sources), refined_topic)
-
-    # ── Placeholder: replace with real LLM synthesis ─────────────────────────
-    # from langchain_openai import ChatOpenAI
-    # context = _build_context(sources)
-    # llm = ChatOpenAI(model=settings.LLM_MODEL)
-    # response = llm.invoke(f"Analyze the following research on '{refined_topic}':\n{context}")
-
-    summary = (
-        f"This is a placeholder summary for the topic '{refined_topic}'. "
-        f"A total of {len(sources)} sources were analyzed."
-    )
-    key_findings = [
-        f"Finding 1: Placeholder insight about {refined_topic}.",
-        f"Finding 2: Another placeholder insight from {len(sources)} sources.",
-        "Finding 3: Further details to be filled by real LLM analysis.",
-    ]
-    themes = ["Theme A", "Theme B", "Theme C"]
-    recommendations = [
-        "Recommendation 1: Explore topic further.",
-        "Recommendation 2: Cross-reference with domain experts.",
-    ]
-    confidence_score = round(min(1.0, len(sources) / 10), 2)
-
-    logger.info("[analyst_agent] Analysis complete. Confidence: %s", confidence_score)
-
-    return {
-        **state,
-        "summary": summary,
-        "key_findings": key_findings,
-        "themes": themes,
-        "recommendations": recommendations,
-        "confidence_score": confidence_score,
-        "status": "analyzing",
-        "messages": ["Analysis complete."],
-    }
+async def analyst_agent_node(state: ResearchState) -> dict:
+    logger.info("Analyst agent started")
+    try:
+        if not state["research_data"]:
+            return {
+                "analysis": {},
+                "current_node": "analyst_agent",
+                "error": "No research data to analyze"
+            }
+        formatted = ""
+        for i, item in enumerate(state["research_data"][:15]):
+            formatted += f"Source {i+1}: {item.get('title','')}\n"
+            formatted += f"Summary: {item.get('summary','')[:300]}\n\n"
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are a research analyst.
+            Respond with raw JSON only. No markdown. No explanation.
+            JSON format:
+            {{
+                "key_findings": [{{"title": str, "description": str}}],
+                "research_gaps": [str, str, str],
+                "emerging_trends": [str, str, str],
+                "themes": [str, str, str, str],
+                "source_count": int,
+                "conclusion": str
+            }}"""),
+            ("human", "Topic: {topic}\n\nData:\n{data}")
+        ])
+        llm = get_llm()
+        chain = prompt | llm
+        response = await chain.ainvoke({
+            "topic": state["confirmed_topic"],
+            "data": formatted[:3000]
+        })
+        text = response.content.strip()
+        if "```" in text:
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        parsed = json.loads(text.strip())
+        logger.info(f"Analysis complete: {len(parsed.get('key_findings',[]))} findings")
+        return {"analysis": parsed, "current_node": "analyst_agent"}
+    except Exception as e:
+        logger.error(f"Analyst error: {e}")
+        return {
+            "analysis": {
+                "key_findings": [],
+                "research_gaps": [],
+                "emerging_trends": [],
+                "themes": [],
+                "source_count": len(state["research_data"]),
+                "conclusion": "Analysis could not be completed."
+            },
+            "current_node": "analyst_agent",
+            "error": str(e)
+        }
