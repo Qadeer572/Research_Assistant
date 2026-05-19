@@ -1,0 +1,2 @@
+# This file keeps the outputs/research directory tracked in git.
+# Actual research datasets (.json / .csv) are excluded via .gitignore.

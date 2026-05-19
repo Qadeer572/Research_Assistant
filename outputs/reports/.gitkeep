@@ -1,0 +1,2 @@
+# This file keeps the outputs/reports directory tracked in git.
+# Actual PDF and DOCX report files are excluded via .gitignore.
