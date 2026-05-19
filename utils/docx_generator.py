@@ -1,56 +1,47 @@
-"""
-docx_generator.py
-Generates a structured DOCX research report using python-docx.
-Signature: generate_docx(report_content: dict, session_id: str) -> str
-"""
-import logging
 import os
-from typing import Dict, Any
-from config.settings import get_settings
+from docx import Document
+from docx.shared import Pt, RGBColor, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-logger = logging.getLogger(__name__)
-
-
-def generate_docx(report_content: Dict[str, Any], session_id: str) -> str:
-    """
-    Generate a DOCX report from `report_content` and save it to the 
-    configured report output directory, named by session_id.
-
-    Returns the absolute path of the generated file.
-    """
-    settings = get_settings()
-    os.makedirs(settings.report_output_dir, exist_ok=True)
-    output_path = os.path.join(settings.report_output_dir, f"{session_id}.docx")
-
-    try:
-        # ── Real implementation (uncomment after: pip install python-docx) ───
-        # from docx import Document
-        # from docx.shared import Pt
-        #
-        # doc = Document()
-        # doc.add_heading(report_content.get("title", "Research Report"), level=0)
-        # doc.add_heading("Executive Summary", level=1)
-        # doc.add_paragraph(report_content.get("abstract", ""))
-        # doc.add_heading("Key Findings", level=1)
-        # doc.add_paragraph(str(report_content.get("key_findings", "")))
-        # doc.add_heading("Themes", level=1)
-        # doc.add_paragraph(str(report_content.get("themes", "")))
-        # doc.add_heading("Recommendations", level=1)
-        # doc.add_paragraph(str(report_content.get("conclusion", "")))
-        # doc.save(output_path)
-
-        # ── Placeholder: write a minimal stub DOCX (zip-based format) ────────
-        # A real DOCX is a ZIP archive; we write a plain text placeholder instead.
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(f"[DOCX Placeholder]\n")
-            f.write(f"Title: {report_content.get('title', '')}\n")
-            f.write(f"Abstract: {report_content.get('abstract', '')}\n")
-            f.write(f"Key Findings: {report_content.get('key_findings', '')}\n")
-
-        logger.info("[docx_generator] DOCX written: %s", output_path)
-
-    except Exception as exc:
-        logger.error("[docx_generator] Failed to generate DOCX: %s", exc)
-        raise
-
-    return output_path
+def generate_docx(report_content: dict, 
+                  session_id: str,
+                  output_dir: str = "outputs/reports") -> str:
+    os.makedirs(output_dir, exist_ok=True)
+    doc = Document()
+    
+    sections_order = [
+        ("title", None),
+        ("abstract", "Abstract"),
+        ("introduction", "Introduction"),
+        ("key_findings", "Key Findings"),
+        ("analysis", "Analysis"),
+        ("research_gaps", "Research Gaps"),
+        ("emerging_trends", "Emerging Trends"),
+        ("conclusion", "Conclusion"),
+        ("references", "References")
+    ]
+    
+    GREEN = RGBColor(0x15, 0x80, 0x3D)
+    DARK = RGBColor(0x1F, 0x29, 0x37)
+    
+    for key, heading in sections_order:
+        content = report_content.get(key, "Content not available")
+        if heading is None:
+            p = doc.add_heading(str(content), 0)
+            p.runs[0].font.color.rgb = GREEN
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        else:
+            h = doc.add_heading(heading, 1)
+            h.runs[0].font.color.rgb = GREEN
+            if key == "references" and isinstance(content, list):
+                for ref in content:
+                    p = doc.add_paragraph(str(ref), style="List Bullet")
+                    p.runs[0].font.size = Pt(10)
+            else:
+                p = doc.add_paragraph(str(content))
+                p.runs[0].font.size = Pt(11)
+                p.runs[0].font.color.rgb = DARK
+    
+    path = f"{output_dir}/{session_id}_report.docx"
+    doc.save(path)
+    return os.path.abspath(path)

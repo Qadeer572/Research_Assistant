@@ -1,129 +1,118 @@
-"""
-routers/research.py
-FastAPI router for the research pipeline.
-
-Endpoints:
-  POST /research/start   — submit a research request and run the full pipeline
-  GET  /research/status  — check current status of a pipeline run
-  GET  /research/stream  — SSE stream for live pipeline progress (placeholder)
-"""
-import uuid
-import logging
+import os
+from typing import List, Dict, Any
+from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from fastapi.responses import StreamingResponse
-from models.schemas import ResearchRequest, ResearchResponse, ResearchStatus
-from agents.graph import run_pipeline
-from agents.state import ResearchState as AgentState
+from fastapi.responses import FileResponse
+from agents.state import create_initial_state
+from agents.graph import get_graph
+import uuid
 
-logger = logging.getLogger(__name__)
+router = APIRouter()
 
-router = APIRouter(prefix="/research", tags=["Research"])
+active_sessions = {}
 
-# In-memory session store (replace with Redis in production)
-_sessions: dict[str, dict] = {}
+class ResearchStartRequest(BaseModel):
+    topic: str
+    sources: List[str] = ["web"]
 
+class ConfirmTopicRequest(BaseModel):
+    confirmed_topic: str
 
-# ── POST /research/start ───────────────────────────────────────────────────────
-
-@router.post("/start", response_model=ResearchResponse, status_code=202)
-async def start_research(
-    request: ResearchRequest,
-    background_tasks: BackgroundTasks,
-) -> ResearchResponse:
-    """
-    Accept a research topic and kick off the full LangGraph pipeline.
-    Returns a session_id immediately; use /status or /stream to track progress.
-    """
+@router.post("/research/start")
+async def start_research(request: ResearchStartRequest, background_tasks: BackgroundTasks):
     session_id = str(uuid.uuid4())
-    logger.info("[router] New research session: %s | Topic: %s", session_id, request.topic)
+    initial_state = create_initial_state(session_id, request.topic, request.sources)
+    active_sessions[session_id] = {"status": "starting", "topic": request.topic}
+    
+    graph = get_graph()
+    config = {"configurable": {"thread_id": session_id}}
 
-    # Store initial session state
-    _sessions[session_id] = {
-        "status": ResearchStatus.PENDING,
-        "topic": request.topic,
-        "result": None,
-        "error": None,
-    }
+    async def run_pipeline():
+        try:
+            active_sessions[session_id]["status"] = "running"
+            await graph.ainvoke(initial_state, config=config)
+            state = graph.get_state(config)
+            if state and state.next:
+                active_sessions[session_id]["status"] = "awaiting_confirmation"
+            else:
+                active_sessions[session_id]["status"] = "completed"
+        except Exception as e:
+            active_sessions[session_id]["status"] = "failed"
+            active_sessions[session_id]["error"] = str(e)
 
-    # Build initial agent state
-    initial_state: AgentState = {
+    background_tasks.add_task(run_pipeline)
+    return {"session_id": session_id, "message": "Research pipeline started."}
+
+
+@router.post("/research/{session_id}/confirm")
+async def confirm_research(session_id: str, request: ConfirmTopicRequest, background_tasks: BackgroundTasks):
+    if session_id not in active_sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    graph = get_graph()
+    config = {"configurable": {"thread_id": session_id}}
+
+    async def resume_pipeline():
+        try:
+            active_sessions[session_id]["status"] = "running"
+            await graph.aupdate_state(config, {"confirmed_topic": request.confirmed_topic})
+            await graph.ainvoke(None, config=config)
+            active_sessions[session_id]["status"] = "completed"
+        except Exception as e:
+            active_sessions[session_id]["status"] = "failed"
+            active_sessions[session_id]["error"] = str(e)
+
+    background_tasks.add_task(resume_pipeline)
+    return {"session_id": session_id, "message": "Research pipeline resumed."}
+
+
+@router.get("/research/{session_id}/results")
+async def get_results(session_id: str):
+    graph = get_graph()
+    config = {"configurable": {"thread_id": session_id}}
+    state = graph.get_state(config)
+    if not state or not state.values:
+        raise HTTPException(status_code=404, detail="Results not found")
+    return {"analysis": state.values.get("analysis", {})}
+
+
+@router.post("/research/{session_id}/report")
+async def generate_report(session_id: str):
+    graph = get_graph()
+    config = {"configurable": {"thread_id": session_id}}
+    state = graph.get_state(config)
+    if not state or not state.values:
+        raise HTTPException(status_code=404, detail="State not found")
+    return {"report_paths": state.values.get("report_paths", {})}
+
+
+@router.get("/research/{session_id}/download/{format}")
+async def download_report(session_id: str, format: str):
+    graph = get_graph()
+    config = {"configurable": {"thread_id": session_id}}
+    state = graph.get_state(config)
+    if not state or not state.values:
+        raise HTTPException(status_code=404, detail="State not found")
+        
+    paths = state.values.get("report_paths", {})
+    if format not in paths or not os.path.exists(paths[format]):
+        raise HTTPException(status_code=404, detail=f"Report format '{format}' not found")
+        
+    return FileResponse(paths[format])
+
+
+@router.get("/research/{session_id}/status")
+async def get_status(session_id: str):
+    if session_id not in active_sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    graph = get_graph()
+    config = {"configurable": {"thread_id": session_id}}
+    state = graph.get_state(config)
+    
+    return {
         "session_id": session_id,
-        "original_topic": request.topic,
-        "max_sources": request.max_sources,
-        "include_arxiv": request.include_arxiv,
-        "include_news": request.include_news,
-        "include_web": request.include_web,
-        "generate_pdf": request.generate_pdf,
-        "generate_docx": request.generate_docx,
-        "sources": [],
-        "messages": [],
-        "status": "pending",
-        "error": None,
+        "status": active_sessions[session_id]["status"],
+        "graph_state": state.values if state else {},
+        "next_nodes": state.next if state else []
     }
-
-    # Run pipeline in background
-    background_tasks.add_task(_run_pipeline_task, session_id, initial_state)
-
-    return ResearchResponse(
-        session_id=session_id,
-        status=ResearchStatus.PENDING,
-        topic=request.topic,
-    )
-
-
-# ── GET /research/status/{session_id} ─────────────────────────────────────────
-
-@router.get("/status/{session_id}", response_model=ResearchResponse)
-async def get_status(session_id: str) -> ResearchResponse:
-    """Return the current status and results of a research session."""
-    session = _sessions.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
-
-    result = session.get("result") or {}
-
-    return ResearchResponse(
-        session_id=session_id,
-        status=session["status"],
-        topic=session["topic"],
-        refined_topic=result.get("refined_topic"),
-        error=session.get("error"),
-    )
-
-
-# ── GET /research/stream/{session_id} — SSE ────────────────────────────────────
-
-@router.get("/stream/{session_id}")
-async def stream_progress(session_id: str):
-    """
-    SSE endpoint — streams pipeline progress events for a given session.
-    Replace the placeholder generator with a real pub/sub (e.g. Redis Streams).
-    """
-    session = _sessions.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
-
-    async def event_generator():
-        yield f"data: {{\"session_id\": \"{session_id}\", \"status\": \"connected\"}}\n\n"
-        # ── Real implementation: subscribe to Redis channel and yield events ──
-        # async for message in redis_subscribe(session_id):
-        #     yield f"data: {message}\n\n"
-        yield f"data: {{\"session_id\": \"{session_id}\", \"status\": \"streaming_placeholder\"}}\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
-# ── Internal background task ───────────────────────────────────────────────────
-
-def _run_pipeline_task(session_id: str, initial_state: AgentState) -> None:
-    """Background task that executes the LangGraph pipeline and updates session state."""
-    try:
-        _sessions[session_id]["status"] = ResearchStatus.RESEARCHING
-        final_state = run_pipeline(initial_state)
-        _sessions[session_id]["status"] = ResearchStatus.COMPLETED
-        _sessions[session_id]["result"] = final_state
-        logger.info("[router] Pipeline completed for session: %s", session_id)
-    except Exception as exc:
-        logger.error("[router] Pipeline failed for session %s: %s", session_id, exc)
-        _sessions[session_id]["status"] = ResearchStatus.FAILED
-        _sessions[session_id]["error"] = str(exc)

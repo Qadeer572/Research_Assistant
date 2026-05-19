@@ -1,79 +1,47 @@
-"""
-main.py
-FastAPI application entrypoint for the AI Research Agent.
-Run with: uvicorn main:app --reload
-"""
-import logging
-import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-
-from config.settings import get_settings
-settings = get_settings()
 from routers.research import router as research_router
+from config.settings import get_settings
+import logging
 
-# ── Logging ────────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL, logging.INFO) if hasattr(settings, "LOG_LEVEL") else logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
-
-# ── Lifespan (startup / shutdown) ─────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create required output directories on startup."""
-    for path in [settings.OUTPUT_RESEARCH_DIR, settings.OUTPUT_REPORTS_DIR]:
-        os.makedirs(path, exist_ok=True)
-        logger.info("Ensured directory exists: %s", path)
-    logger.info("🚀  %s v%s is starting up", settings.APP_NAME, settings.APP_VERSION)
+    logger.info(f"Starting AI Research Agent API")
+    logger.info(f"Model: {settings.hf_model_id}")
     yield
-    logger.info("🛑  %s is shutting down", settings.APP_NAME)
+    logger.info("Shutting down")
 
-
-# ── App Factory ────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title=settings.APP_NAME,
-    version=settings.APP_VERSION,
-    description=(
-        "AI Research Agent powered by FastAPI + LangGraph + LangChain. "
-        "Supports multi-source research (Tavily, ArXiv, NewsAPI), "
-        "topic refinement, analysis, and PDF/DOCX report generation."
-    ),
-    docs_url="/docs",
-    redoc_url="/redoc",
-    lifespan=lifespan,
+    title="AI Research Agent API",
+    description="Agentic research using LangGraph and Hugging Face free models",
+    version="1.0.0",
+    lifespan=lifespan
 )
 
-# ── CORS ───────────────────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # Restrict in production
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
 
-# ── Routers ────────────────────────────────────────────────────────────────────
-app.include_router(research_router)
+app.include_router(research_router, prefix="/api/v1")
 
-
-# ── Root endpoint ──────────────────────────────────────────────────────────────
-@app.get("/", tags=["Health"])
-async def root():
-    """Liveness check — returns service name and version."""
-    return JSONResponse({
-        "name": settings.APP_NAME,
-        "version": settings.APP_VERSION,
-        "status": "running",
-        "docs": "/docs",
-    })
-
-
-@app.get("/health", tags=["Health"])
+@app.get("/health")
 async def health():
-    """Readiness probe for Docker / Kubernetes."""
-    return JSONResponse({"status": "healthy"})
+    return {
+        "status": "ok",
+        "model": settings.hf_model_id,
+        "env": settings.app_env
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host=settings.app_host,
+                port=settings.app_port, reload=True)

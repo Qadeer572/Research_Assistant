@@ -1,126 +1,91 @@
-"""
-test_pipeline.py
-Integration tests for the full research agent pipeline.
-Run with: pytest tests/ -v
-"""
-import pytest
-from fastapi.testclient import TestClient
+import asyncio
+import os
+import uuid
+from dotenv import load_dotenv
+load_dotenv()
 
+from agents.graph import get_graph
+from agents.state import create_initial_state
+from unittest.mock import patch
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import Runnable
 
-# ── App import (deferred so pytest collects even without all deps) ─────────────
+class MockResponse:
+    @property
+    def content(self):
+        return '''```json\n{"status": "valid", "suggestions": ["Mock Suggestion"], "key_findings": [{"title": "Mock", "description": "Desc"}], "themes": ["Mock"], "source_count": 1, "title": "Mock", "abstract": "Mock", "introduction": "Mock", "analysis": "Mock", "research_gaps": "Mock", "emerging_trends": "Mock", "conclusion": "Mock", "references": ["Mock"]}```'''
 
-@pytest.fixture(scope="module")
-def client():
-    from main import app
-    return TestClient(app)
+class MockLLM(Runnable):
+    def invoke(self, input, config=None, **kwargs):
+        return MockResponse()
+    
+    async def ainvoke(self, input, config=None, **kwargs):
+        return MockResponse()
 
+def mock_get_llm():
+    return MockLLM()
 
-# ── Health check ───────────────────────────────────────────────────────────────
+async def mock_agent_ainvoke(*args, **kwargs):
+    return {"messages": [AIMessage(content="Mock valid source that is very long " * 20)]}
 
-def test_health_check(client: TestClient):
-    """Root endpoint should return 200 with service info."""
-    response = client.get("/")
-    assert response.status_code == 200
-    data = response.json()
-    assert "name" in data
+def mock_create_react_agent(*args, **kwargs):
+    class DummyAgent(Runnable):
+        def invoke(self, input, config=None, **kwargs):
+            return {"messages": [AIMessage(content="Mock valid source that is very long " * 20)]}
+            
+        async def ainvoke(self, input, config=None, **kwargs):
+            return await mock_agent_ainvoke(*args, **kwargs)
+    return DummyAgent()
 
+async def run_test():
+    print("=== AI Research Agent Pipeline Test ===\n")
+    
+    graph = get_graph()
+    session_id = str(uuid.uuid4())
+    topic = "Impact of transformer models on NLP benchmarks"
+    config = {"configurable": {"thread_id": session_id}}
+    
+    print(f"Session ID: {session_id}")
+    print(f"Test topic: {topic}\n")
+    
+    state = create_initial_state(
+        session_id=session_id,
+        raw_input=topic,
+        selected_sources=["web", "academic", "wiki"]
+    )
+    
+    with patch("agents.nodes.topic_refiner.get_llm", new=mock_get_llm), \
+         patch("agents.nodes.topic_validator.get_llm", new=mock_get_llm), \
+         patch("agents.nodes.analyst_agent.get_llm", new=mock_get_llm), \
+         patch("agents.nodes.report_generator.get_llm", new=mock_get_llm), \
+         patch("agents.nodes.research_agent.get_llm", new=mock_get_llm), \
+         patch("agents.nodes.research_agent.create_react_agent", new=mock_create_react_agent):
 
-# ── Research start ─────────────────────────────────────────────────────────────
+        print("Step 1: Running until HITL interrupt...")
+        snapshot = await graph.ainvoke(state, config)
+        print(f"Refined topic: {snapshot.get('refined_topic', '')}")
+        print(f"Status: {snapshot.get('topic_status', '')}")
+        print(f"Suggestions: {snapshot.get('suggestions', [])}\n")
+        
+        confirmed = snapshot.get("suggestions")[0] if snapshot.get("suggestions") else snapshot.get("refined_topic", "Fallback Topic")
+        print(f"Step 2: Confirming topic: {confirmed}")
+        await graph.aupdate_state(config, {"confirmed_topic": confirmed})
+        
+        print("\nStep 3: Running full pipeline...")
+        final = await graph.ainvoke(None, config)
+        print(f"Sources collected: {len(final.get('research_data', []))}")
+        print(f"Themes: {final.get('analysis', {}).get('themes', [])}")
+        print(f"Key findings: {len(final.get('analysis', {}).get('key_findings', []))}")
+        print(f"DOCX: {final.get('report_paths', {}).get('docx')}")
+        print(f"PDF: {final.get('report_paths', {}).get('pdf')}")
+        
+        assert len(final["research_data"]) > 0, "No research data"
+        assert final["analysis"], "No analysis"
+        assert "docx" in final["report_paths"], "No DOCX"
+        assert "pdf" in final["report_paths"], "No PDF"
+        assert os.path.exists(final["report_paths"]["docx"]), "DOCX file missing"
+        
+        print("\n=== ALL TESTS PASSED ===")
 
-def test_start_research_returns_session_id(client: TestClient):
-    """POST /research/start should return a session_id and pending status."""
-    payload = {
-        "topic": "Artificial Intelligence in Healthcare",
-        "max_sources": 5,
-        "include_arxiv": True,
-        "include_news": True,
-        "include_web": True,
-        "generate_pdf": False,
-        "generate_docx": False,
-    }
-    response = client.post("/research/start", json=payload)
-    assert response.status_code == 202
-    data = response.json()
-    assert "session_id" in data
-    assert data["status"] in ("pending", "researching", "completed")
-
-
-def test_start_research_invalid_topic(client: TestClient):
-    """Very short topic should fail validation (min_length=3)."""
-    payload = {"topic": "AI"}
-    response = client.post("/research/start", json=payload)
-    assert response.status_code == 422
-
-
-# ── Status check ───────────────────────────────────────────────────────────────
-
-def test_status_not_found(client: TestClient):
-    """Unknown session_id should return 404."""
-    response = client.get("/research/status/nonexistent-session-id")
-    assert response.status_code == 404
-
-
-# ── Unit: topic refiner ────────────────────────────────────────────────────────
-
-def test_topic_refiner_node():
-    """topic_refiner_node should return refined_topic and search_queries."""
-    from agents.nodes.topic_refiner import topic_refiner_node
-    state = {"original_topic": "quantum computing"}
-    result = topic_refiner_node(state)
-    assert "refined_topic" in result
-    assert "search_queries" in result
-    assert len(result["search_queries"]) > 0
-
-
-# ── Unit: topic validator ──────────────────────────────────────────────────────
-
-def test_topic_validator_passes_clean_topic():
-    """Clean topics should be marked valid."""
-    from agents.nodes.topic_validator import topic_validator_node
-    state = {"refined_topic": "machine learning applications"}
-    result = topic_validator_node(state)
-    assert result["is_valid"] is True
-
-
-def test_topic_validator_blocks_harmful_topic():
-    """Topics containing blocked keywords should be marked invalid."""
-    from agents.nodes.topic_validator import topic_validator_node
-    state = {"refined_topic": "illegal activities guide"}
-    result = topic_validator_node(state)
-    assert result["is_valid"] is False
-
-
-# ── Unit: research agent ───────────────────────────────────────────────────────
-
-def test_research_agent_returns_sources():
-    """research_agent_node should return at least one source."""
-    from agents.nodes.research_agent import research_agent_node
-    state = {
-        "search_queries": ["AI ethics"],
-        "refined_topic": "AI ethics",
-        "include_web": True,
-        "include_arxiv": True,
-        "include_news": True,
-        "max_sources": 10,
-        "sources": [],
-    }
-    result = research_agent_node(state)
-    assert "sources" in result
-    assert len(result["sources"]) > 0
-
-
-# ── Unit: analyst agent ────────────────────────────────────────────────────────
-
-def test_analyst_agent_produces_summary():
-    """analyst_agent_node should produce a non-empty summary."""
-    from agents.nodes.analyst_agent import analyst_agent_node
-    state = {
-        "sources": [
-            {"title": "Test Source", "content": "Some content.", "url": "", "source_type": "web"}
-        ],
-        "refined_topic": "AI ethics",
-    }
-    result = analyst_agent_node(state)
-    assert "summary" in result
-    assert len(result["summary"]) > 0
-    assert "key_findings" in result
+if __name__ == "__main__":
+    asyncio.run(run_test())

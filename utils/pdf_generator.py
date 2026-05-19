@@ -1,62 +1,47 @@
-"""
-pdf_generator.py
-Generates a structured PDF research report.
-Signature: generate_pdf(report_content: dict, session_id: str) -> str
-"""
 import os
-import logging
-from typing import Dict, Any
-from config.settings import get_settings
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.colors import HexColor
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.units import inch
 
-logger = logging.getLogger(__name__)
-
-
-def generate_pdf(report_content: Dict[str, Any], session_id: str) -> str:
-    """
-    Generate a PDF report from report_content and save it under the
-    configured report output directory, named by session_id.
-
-    Returns the absolute path of the generated file.
-    """
-    settings = get_settings()
-    os.makedirs(settings.report_output_dir, exist_ok=True)
-    output_path = os.path.join(settings.report_output_dir, f"{session_id}.pdf")
-
-    try:
-        # ── Real implementation (uncomment after: pip install reportlab) ─────
-        # from reportlab.lib.pagesizes import A4
-        # from reportlab.lib.styles import getSampleStyleSheet
-        # from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-        #
-        # doc = SimpleDocTemplate(output_path, pagesize=A4)
-        # styles = getSampleStyleSheet()
-        # story = []
-        # story.append(Paragraph(report_content.get("title", "Research Report"), styles["Title"]))
-        # story.append(Spacer(1, 12))
-        # for section in ["abstract", "introduction", "key_findings",
-        #                  "analysis", "research_gaps", "emerging_trends", "conclusion"]:
-        #     if report_content.get(section):
-        #         story.append(Paragraph(section.replace("_", " ").title(), styles["Heading2"]))
-        #         story.append(Paragraph(str(report_content[section]), styles["Normal"]))
-        #         story.append(Spacer(1, 8))
-        # doc.build(story)
-
-        # ── Placeholder: minimal valid PDF stub ───────────────────────────────
-        content = (
-            "%PDF-1.4\n"
-            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
-            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
-            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n"
-            "xref\n0 4\n0000000000 65535 f\n"
-            "trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n0\n%%EOF\n"
-        )
-        with open(output_path, "wb") as f:
-            f.write(content.encode("latin-1"))
-
-        logger.info("[pdf_generator] PDF written: %s", output_path)
-
-    except Exception as exc:
-        logger.error("[pdf_generator] Failed: %s", exc)
-        raise
-
-    return output_path
+def generate_pdf(report_content: dict,
+                 session_id: str,
+                 output_dir: str = "outputs/reports") -> str:
+    os.makedirs(output_dir, exist_ok=True)
+    path = f"{output_dir}/{session_id}_report.pdf"
+    doc = SimpleDocTemplate(path, pagesize=A4)
+    styles = getSampleStyleSheet()
+    GREEN = HexColor("#15803D")
+    DARK = HexColor("#1F2937")
+    
+    title_style = ParagraphStyle("Title", fontSize=20,
+        textColor=GREEN, spaceAfter=20, fontName="Helvetica-Bold")
+    heading_style = ParagraphStyle("Heading", fontSize=14,
+        textColor=GREEN, spaceAfter=10, fontName="Helvetica-Bold")
+    body_style = ParagraphStyle("Body", fontSize=11,
+        textColor=DARK, spaceAfter=12, leading=16)
+    
+    story = []
+    sections_order = [
+        ("title", None),
+        ("abstract", "Abstract"),
+        ("introduction", "Introduction"),
+        ("key_findings", "Key Findings"),
+        ("analysis", "Analysis"),
+        ("research_gaps", "Research Gaps"),
+        ("emerging_trends", "Emerging Trends"),
+        ("conclusion", "Conclusion")
+    ]
+    
+    for key, heading in sections_order:
+        content = report_content.get(key, "Content not available")
+        if heading is None:
+            story.append(Paragraph(str(content), title_style))
+        else:
+            story.append(Paragraph(heading, heading_style))
+            story.append(Paragraph(str(content), body_style))
+        story.append(Spacer(1, 0.2*inch))
+    
+    doc.build(story)
+    return os.path.abspath(path)
