@@ -131,7 +131,3 @@ refine_topic → validate_topic ──(invalid)──► END
 | `OUTPUT_REPORTS_DIR` | Path for report output | `outputs/reports` |
 
 ---
-
-## License
-
-MIT
